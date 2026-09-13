@@ -1,27 +1,52 @@
-# UPI Offline Mesh — Demo
+# UPI Offline Mesh
 
-A Spring Boot backend that demonstrates **offline UPI payments routed through a Bluetooth-style mesh network**. You're in a basement with zero connectivity. You send your friend ₹500. Your phone encrypts the payment, broadcasts it to nearby phones, and the packet hops device-to-device until *some* phone walks outside, gets 4G, and silently uploads it to this backend. The backend decrypts, deduplicates, and settles.
+> A Spring Boot backend and software mesh simulator for encrypted, offline payment delivery with deferred settlement.
 
-This repo is the **server side** of that system, plus a software simulator of the mesh so you can demo the whole flow on a single laptop without any real Bluetooth hardware.
+UPI Offline Mesh explores how a payment could travel through nearby devices when the sender has no internet connection. The sender encrypts a payment instruction, virtual phones gossip the packet across a mesh, and an internet-connected bridge uploads it to the backend. The backend authenticates the ciphertext, rejects duplicates and stale packets, and settles the transaction exactly once.
+
+This project implements production-oriented security and concurrency patterns while clearly separating the prototype components from a production UPI deployment.
+
+## Resume Summary
+
+**Project:** UPI Offline Mesh | **Stack:** Java 17, Spring Boot 3, Spring Data JPA, H2, Thymeleaf, Maven
+
+- Built a Spring Boot payment backend with REST APIs, an interactive dashboard, and an in-memory H2 ledger.
+- Implemented hybrid RSA-OAEP and AES-256-GCM encryption so mesh intermediaries carry opaque, tamper-evident packets.
+- Designed concurrent idempotency using atomic ciphertext-hash claims; duplicate bridge deliveries settle exactly once.
+- Added transactional debit/credit settlement, optimistic locking, replay protection, and concurrency-focused integration tests.
+- Developed a virtual Bluetooth-style gossip simulator for offline delivery and bridge ingestion on one laptop.
+
+## Highlights
+
+| Capability | Implementation |
+|---|---|
+| Confidentiality and integrity | RSA-2048/OAEP-SHA256 wraps a per-packet AES-256-GCM key |
+| Duplicate protection | Atomic `ConcurrentHashMap.putIfAbsent`; unique database packet hash as a second guard |
+| Replay protection | Encrypted timestamp freshness window and idempotent ciphertext hash |
+| Settlement consistency | `@Transactional` debit, credit, and ledger write with optimistic locking |
+| Offline delivery | Virtual devices gossip packets until an internet-enabled bridge uploads them |
+| Verification | Encryption, tamper rejection, and three-bridge concurrency tests |
 
 ---
 
 ## Table of Contents
 
-1. [What this demo proves](#what-this-demo-proves)
-2. [How to run it](#how-to-run-it)
-3. [The demo flow (step by step)](#the-demo-flow-step-by-step)
-4. [Architecture](#architecture)
-5. [The three hard problems and how they're solved](#the-three-hard-problems-and-how-theyre-solved)
-6. [File-by-file walkthrough](#file-by-file-walkthrough)
-7. [API reference](#api-reference)
-8. [Tests](#tests)
-9. [What's NOT real (and what would change for production)](#whats-not-real-and-what-would-change-for-production)
-10. [Honest limitations of the concept](#honest-limitations-of-the-concept)
+1. [Resume summary](#resume-summary)
+2. [Highlights](#highlights)
+3. [System capabilities](#system-capabilities)
+4. [How to run it](#how-to-run-it)
+5. [End-to-end workflow](#end-to-end-workflow)
+6. [Architecture](#architecture)
+7. [The three hard problems and how they're solved](#the-three-hard-problems-and-how-theyre-solved)
+8. [File-by-file walkthrough](#file-by-file-walkthrough)
+9. [API reference](#api-reference)
+10. [Tests](#tests)
+11. [Prototype boundaries and production direction](#prototype-boundaries-and-production-direction)
+12. [Design limitations](#design-limitations)
 
 ---
 
-## What this demo proves
+## System capabilities
 
 The system shows three things working end to end:
 
@@ -29,7 +54,7 @@ The system shows three things working end to end:
 2. **Even if the same payment reaches the backend simultaneously through multiple bridge nodes, it settles exactly once.** (Idempotency via atomic compare-and-set on the ciphertext hash.)
 3. **A tampered or replayed packet is rejected** before it touches the ledger.
 
-You'll see all three in the dashboard.
+All three behaviors are available through the dashboard.
 
 ---
 
@@ -37,18 +62,24 @@ You'll see all three in the dashboard.
 
 ### Prerequisites
 
-- **JDK 17 or newer** installed and on PATH (or `JAVA_HOME` set). Check with `java -version`.
-- That's it. No database, no Redis, no Maven (the wrapper handles it). Just Java.
+- **JDK 17 or newer** installed and available on PATH. Check with `java -version`.
+- No separate database, Redis, or Maven installation is required; the Maven Wrapper handles the build.
+
+Install JDK 17 on Windows with `winget` if needed:
+
+```powershell
+winget install --id EclipseAdoptium.Temurin.17.JDK --exact
+```
 
 ### Run on Windows
 
 Open a terminal in the project folder and run:
 
-```cmd
-mvnw.cmd spring-boot:run
+```powershell
+.\mvnw.cmd spring-boot:run
 ```
 
-The first run downloads Maven (~10 MB) and all dependencies (~80 MB) — give it a couple of minutes. Subsequent runs start in a few seconds.
+The first run downloads Maven and project dependencies, so it may take a few minutes. Subsequent runs start in a few seconds.
 
 ### Run on Mac/Linux
 
@@ -62,7 +93,7 @@ Once you see `Started UpiMeshApplication in X.XXX seconds`, open:
 
 **http://localhost:8080**
 
-You'll get a dark dashboard with everything you need to drive the demo.
+The dashboard provides controls for the complete payment workflow.
 
 ### Stop the server
 
@@ -70,17 +101,17 @@ You'll get a dark dashboard with everything you need to drive the demo.
 
 ### Run the tests
 
-```cmd
-mvnw.cmd test
+```powershell
+.\mvnw.cmd test
 ```
 
 The interesting one is `IdempotencyConcurrencyTest` — it fires three threads delivering the same packet simultaneously and asserts that exactly one settles.
 
 ---
 
-## The demo flow (step by step)
+## End-to-end workflow
 
-The dashboard has four buttons that walk through the full pipeline. The intended sequence:
+The dashboard has four controls for the complete payment pipeline:
 
 ### Step 1 — Compose a payment
 
@@ -109,7 +140,7 @@ In the real system this would happen organically as people walk past each other 
 
 Click **"📡 Bridges Upload to Backend"**.
 
-`phone-bridge` is the only device with `hasInternet=true`. The dashboard simulates that phone walking outside and getting 4G. It POSTs every packet it holds to `/api/bridge/ingest`.
+`phone-bridge` is the only device with `hasInternet=true`. The dashboard models that device becoming connected and uploading every packet it holds to `/api/bridge/ingest`.
 
 The backend pipeline runs:
 1. Hash the ciphertext (`SHA-256`).
@@ -120,7 +151,7 @@ The backend pipeline runs:
 
 Watch the **Account Balances** table — money has moved. Watch the **Transaction Ledger** — a new row appears.
 
-### Step 4 — Demonstrate idempotency (the killer feature)
+### Step 4 — Validate idempotency
 
 Reset the mesh. Inject a single packet. Run gossip 2 times. Now **all 5 devices hold the same packet, including multiple bridges in a more complex setup**.
 
@@ -253,7 +284,7 @@ upi-offline-mesh/
 └── src/main/
     ├── resources/
     │   ├── application.properties           H2 in-memory DB, port 8080, TTLs
-    │   └── templates/dashboard.html         The interactive demo UI
+    │   └── templates/dashboard.html         The interactive dashboard UI
     └── java/com/demo/upimesh/
         ├── UpiMeshApplication.java          Spring Boot main class
         │
@@ -299,7 +330,7 @@ src/test/java/com/demo/upimesh/
 | GET | `/api/accounts` | All accounts and balances |
 | GET | `/api/transactions` | Last 20 transactions |
 | GET | `/api/mesh/state` | Current state of every virtual device |
-| POST | `/api/demo/send` | Simulate sender phone — encrypt + inject packet |
+| POST | `/api/demo/send` | Create an encrypted packet and inject it into the mesh |
 | POST | `/api/mesh/gossip` | Run one round of gossip across the mesh |
 | POST | `/api/mesh/flush` | Bridges with internet upload to backend (parallel) |
 | POST | `/api/mesh/reset` | Clear mesh + idempotency cache |
@@ -351,11 +382,11 @@ The three included tests:
 
 ---
 
-## What's NOT real (and what would change for production)
+## Prototype Boundaries and Production Direction
 
-This is a teaching demo. To make it production-grade you'd swap these things:
+This is a functional prototype. A production deployment would replace or extend these components:
 
-| What's in the demo | What it would be in production |
+| Current prototype | Production direction |
 |---|---|
 | H2 in-memory DB | PostgreSQL / MySQL with replicas |
 | `ConcurrentHashMap` for idempotency | Redis with `SET NX EX` |
@@ -373,16 +404,16 @@ The cryptography and idempotency code is essentially production-shaped. The infr
 
 ---
 
-## Honest limitations of the concept
+## Design Limitations
 
 I want this README to be useful to you when someone reviews the project, so let's be straight about what this design **does not** solve. These are not implementation bugs — they're inherent to "no internet, anywhere in the chain":
 
 1. **The receiver has no way to verify the sender has the funds.** When sender hands receiver a phone showing "₹500 sent," it's an IOU, not a settled payment. If the sender's account is empty when the packet finally reaches the backend, the settlement will be `REJECTED` and the receiver is out ₹500 with no recourse. *This is why real offline UPI (UPI Lite) uses a pre-funded hardware-backed wallet* — to give cryptographic proof of available funds offline.
 2. **A malicious sender can double-spend offline.** With ₹500 in their account, they could send a packet to Bob in basement A, walk to basement B, and send another ₹500 to Carol. Whichever packet hits the backend first wins; the other gets `REJECTED`. Same root cause as #1.
-3. **Bluetooth in real life is hard.** Background BLE on Android is heavily throttled since Android 8. iOS peripheral mode is locked down. Two strangers' phones reliably forming a GATT connection while the apps aren't actively open is genuinely difficult and a lot of energy. This demo skips that problem entirely by simulating the mesh.
+3. **Bluetooth in real life is hard.** Background BLE on Android is heavily throttled since Android 8. iOS peripheral mode is locked down. Two strangers' phones reliably forming a GATT connection while the apps aren't actively open is genuinely difficult and a lot of energy. This implementation models that problem with virtual devices rather than real Bluetooth hardware.
 4. **Privacy / liability.** A stranger carries your encrypted transaction packet on their phone. They can't read it, but its existence is metadata. In a real deployment you'd want to think about regulatory disclosures and what happens if a device is seized.
 
-For a college / portfolio project: name the concept honestly as **"mesh-routed deferred settlement"** rather than "real-time offline UPI," and you'll have a much stronger pitch. The cryptography and idempotency work here is real engineering and worth showing off.
+The most accurate description is **"mesh-routed deferred settlement"** rather than "real-time offline UPI." The cryptography, idempotency, and transactional settlement paths are implemented in the backend; the device and banking integrations remain prototype boundaries.
 
 ---
 
@@ -402,4 +433,4 @@ For a college / portfolio project: name the concept honestly as **"mesh-routed d
 
 ## License
 
-Demo code, no license. Use it however you want for learning.
+No license has been specified for this repository.
